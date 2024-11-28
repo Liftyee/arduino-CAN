@@ -163,40 +163,60 @@ int MCP2515Class::endPacket()
     return 0;
   }
 
-  int n = 0;
+  int n = 0; // use transmit buffer 0
 
-  if (_txExtended) {
+  /* 
+    WRITE FRAME IDENTIFIER
+    */
+  if (_txExtended) { // the identifier is larger if the frame is extended
+    // write transmit frame identifier registers for buffer n
     writeRegister(REG_TXBnSIDH(n), _txId >> 21);
-    writeRegister(REG_TXBnSIDL(n), (((_txId >> 18) & 0x07) << 5) | FLAG_EXIDE | ((_txId >> 16) & 0x03));
+    writeRegister(REG_TXBnSIDL(n), (((_txId >> 18) & 0x07) << 5) | FLAG_EXIDE | ((_txId >> 16) & 0x03)); // set the extended id flag
+
+    // write extended frame identifier registers
     writeRegister(REG_TXBnEID8(n), (_txId >> 8) & 0xff);
     writeRegister(REG_TXBnEID0(n), _txId & 0xff);
   } else {
+    // not an extended frame, write just the normal identifier registers
     writeRegister(REG_TXBnSIDH(n), _txId >> 3);
     writeRegister(REG_TXBnSIDL(n), _txId << 5);
+
+    // clear extended frame identifier registers
     writeRegister(REG_TXBnEID8(n), 0x00);
     writeRegister(REG_TXBnEID0(n), 0x00);
   }
 
+  /* 
+    WRITE DATA LENGTH CODE AND DATA
+    */
   if (_txRtr) {
+    // bit 6 of the TXBnDLC register indicates RTR frame. OR with 0x40 (0b01000000) to set bit 6
     writeRegister(REG_TXBnDLC(n), 0x40 | _txLength);
-  } else {
-    writeRegister(REG_TXBnDLC(n), _txLength);
 
+    // for a RTR frame, there is no data to write.
+  } else {
+    writeRegister(REG_TXBnDLC(n), _txLength); // write data length to last 4 bits of data length code register
+
+    // write each data byte sequentially
     for (int i = 0; i < _txLength; i++) {
       writeRegister(REG_TXBnD0(n) + i, _txData[i]);
     }
   }
 
+  // Set TXREQ bit (bit 3) to request message be transmitted
   writeRegister(REG_TXBnCTRL(n), 0x08);
 
   bool aborted = false;
 
+  // MCP2515 will unset bit 3 once message has been transmitted.
   while (readRegister(REG_TXBnCTRL(n)) & 0x08) {
+    // Check Bit 4 (TXERR) - indicates bus error while the message was being transmitted.
     if (readRegister(REG_TXBnCTRL(n)) & 0x10) {
       // abort
       aborted = true;
 
-      modifyRegister(REG_CANCTRL, 0x10, 0x10);
+      // Set ABAT bit of CAN Control Register to request abort of ALL pending transmit buffers
+      modifyRegister(REG_CANCTRL, 0x10, 0x10); // TODO: Datasheet states MCU can unset TXREQ on the specific message buffer to abort only that buffer (useful for using multiple buffers)
     }
 
     yield();
@@ -207,8 +227,10 @@ int MCP2515Class::endPacket()
     modifyRegister(REG_CANCTRL, 0x10, 0x00);
   }
 
+  // Clear TX0IF Transmit Buffer n Empty Interrupt Flag bit
   modifyRegister(REG_CANINTF, FLAG_TXnIF(n), 0x00);
 
+  // Check that bits 6,5,4 (ABLF, MLOA, TXERR) are not set, meaning the message wasn't a) aborted; b) lost arbitration; c) destroyed by a bus error
   return (readRegister(REG_TXBnCTRL(n)) & 0x70) ? 0 : 1;
 }
 
